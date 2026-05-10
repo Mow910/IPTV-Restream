@@ -1,35 +1,91 @@
-const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
 require("dotenv").config();
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 /**
- * Service for handling JWT authentication
+ * Service for handling JWT authentication with improved security
  */
 class AuthService {
   constructor() {
     this.ADMIN_ENABLED = process.env.ADMIN_ENABLED === "true";
     this.CHANNEL_SELECTION_REQUIRES_ADMIN =
       process.env.CHANNEL_SELECTION_REQUIRES_ADMIN === "true";
-    this.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+    
     this.JWT_EXPIRY = process.env.JWT_EXPIRY || "24h";
 
-    // Validate admin password if admin mode is enabled
+    // Initialize JWT secret - use stored secret or generate new one
+    this.JWT_SECRET = this._initializeJWTSecret();
+
+    // Initialize admin password hash if admin mode is enabled
+    if (this.ADMIN_ENABLED) {
+      this.adminPasswordHash = this._loadOrCreateAdminPassword();
+    }
+
     if (
       this.ADMIN_ENABLED &&
-      (!this.ADMIN_PASSWORD || this.ADMIN_PASSWORD.length < 12)
+      !this.adminPasswordHash
     ) {
       throw new Error(
-        "ADMIN_PASSWORD must be set and at least 12 characters long for security."
+        "Admin password could not be initialized. Check .env and storage permissions."
+      );
+    }
+  }
+
+  /**
+   * Initialize or load JWT secret from secure storage
+   * @returns {string} JWT secret
+   */
+  _initializeJWTSecret() {
+    const secretPath = path.join(process.env.STORAGE_PATH || "/tmp", ".jwt_secret");
+    
+    try {
+      if (fs.existsSync(secretPath)) {
+        const secret = fs.readFileSync(secretPath, 'utf-8').trim();
+        if (secret.length >= 32) {
+          return secret;
+        }
+      }
+    } catch (err) {
+      console.warn("Could not read JWT secret from disk, generating new one");
+    }
+
+    // Generate new random secret
+    const newSecret = crypto.randomBytes(32).toString('hex');
+    
+    try {
+      fs.writeFileSync(secretPath, newSecret, { mode: 0o600 });
+    } catch (err) {
+      console.warn("Could not persist JWT secret to disk:", err.message);
+    }
+
+    return newSecret;
+  }
+
+  /**
+   * Load or create hashed admin password
+   * @returns {string} Hashed password
+   */
+  _loadOrCreateAdminPassword() {
+    if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 8) {
+      throw new Error(
+        "ADMIN_PASSWORD must be set and at least 8 characters long for security."
       );
     }
 
-    // Generate a secure JWT secret from the admin password
-    // or use a random value if admin mode is disabled
-    this.JWT_SECRET = crypto
-      .createHash("sha256")
-      .update(this.ADMIN_PASSWORD || "")
-      .digest("hex");
+    try {
+      // Hash the password with bcrypt (10 salt rounds)
+      // Note: This should be done once during setup, not on every server start
+      // In production, store the hash in a database
+      return bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
+    } catch (err) {
+      console.error("Error hashing password:", err.message);
+      return null;
+    }
   }
+
   /**
    * Check if channel selection needs admin
    * @returns {boolean}
@@ -43,7 +99,7 @@ class AuthService {
    * @returns {string} JWT token
    */
   generateAdminToken() {
-    return jwt.sign({ isAdmin: true }, this.JWT_SECRET, {
+    return jwt.sign({ isAdmin: true, iat: Date.now() }, this.JWT_SECRET, {
       expiresIn: this.JWT_EXPIRY,
     });
   }
@@ -70,12 +126,34 @@ class AuthService {
   }
 
   /**
-   * Verify admin password
+   * Verify admin password using bcrypt
    * @param {string} password - Password to verify
    * @returns {boolean} True if password matches
    */
   verifyAdminPassword(password) {
-    return this.ADMIN_PASSWORD === password;
+    if (!this.adminPasswordHash) {
+      return false;
+    }
+    try {
+      return bcrypt.compareSync(password, this.adminPasswordHash);
+    } catch (err) {
+      console.error("Password verification error (logged without password)");
+      return false;
+    }
+  }
+
+  /**
+   * Get hashed password (for storing in database, not for comparing)
+   * @param {string} password - Plain text password
+   * @returns {string} Hashed password
+   */
+  hashPassword(password) {
+    try {
+      return bcrypt.hashSync(password, 10);
+    } catch (err) {
+      console.error("Password hashing error");
+      return null;
+    }
   }
 }
 

@@ -1,4 +1,6 @@
 const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
 const { Server } = require('socket.io');
 
@@ -11,29 +13,76 @@ const proxyController = require('./controllers/ProxyController');
 const centralChannelController = require('./controllers/CentralChannelController');
 const channelController = require('./controllers/ChannelController');
 const authController = require('./controllers/AuthController');
+const settingsController = require('./controllers/SettingsController');
+const epgController = require('./controllers/EPGController');
 const streamController = require('./services/restream/StreamController');
 const ChannelService = require('./services/ChannelService');
 const PlaylistUpdater = require('./services/PlaylistUpdater');
+const { validateEnvVars } = require('./utils/envValidator');
 
 dotenv.config();
 
-const app = express();
-app.use(express.json());
+// Validate environment variables
+try {
+  validateEnvVars();
+} catch (error) {
+  console.error('❌ Configuration Error:', error.message);
+  process.exit(1);
+}
 
-// CORS middleware
+const app = express();
+
+// Security middleware
+app.use(helmet());
+
+// Limit payloads size
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: false }));
+
+// Rate limiting for login attempts
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login requests per windowMs
+  message: 'Too many login attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// CORS middleware - whitelist origins
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  const isOriginAllowed = allowedOrigins.length === 0 || allowedOrigins.includes(origin);
+  
+  if (isOriginAllowed) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+  }
+  
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
 
+// HTTPS redirect middleware
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.header('x-forwarded-proto') !== 'https') {
+      res.redirect(`https://${req.header('host')}${req.url}`);
+    } else {
+      next();
+    }
+  });
+}
+
 // Auth routes
 const authRouter = express.Router();
-authRouter.post('/admin-login', authController.adminLogin);
+authRouter.post('/admin-login', loginLimiter, authController.adminLogin);
+authRouter.post('/admin-register', loginLimiter, authController.adminRegister);
 authRouter.get('/admin-status', authController.checkAdminStatus);
 
 app.use('/api/auth', authRouter);
@@ -51,6 +100,19 @@ apiRouter.put('/:channelId', authController.verifyToken, channelController.updat
 apiRouter.post('/', authController.verifyToken, channelController.addChannel);
 app.use('/api/channels', apiRouter);
 
+// Settings routes (admin only)
+const settingsRouter = express.Router();
+settingsRouter.get('/', authController.verifyToken, settingsController.getSettings);
+settingsRouter.post('/', authController.verifyToken, settingsController.updateSettings);
+app.use('/api/admin/settings', settingsRouter);
+
+// EPG routes (admin only)
+const epgRouter = express.Router();
+epgRouter.get('/', authController.verifyToken, epgController.getEPG);
+epgRouter.post('/', authController.verifyToken, epgController.setEPG);
+epgRouter.delete('/', authController.verifyToken, epgController.deleteEPG);
+app.use('/api/admin/epg', epgRouter);
+
 const proxyRouter = express.Router();
 proxyRouter.get('/channel', proxyController.channel);
 proxyRouter.get('/segment', proxyController.segment);
@@ -58,10 +120,11 @@ proxyRouter.get('/key', proxyController.key);
 proxyRouter.get('/current', centralChannelController.currentChannel);
 app.use('/proxy', proxyRouter);
 
-
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, async () => {
-  console.log(`Server listening on Port ${PORT}`);
+  console.log(`\n✅ Server listening on Port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}\n`);
+  
   const currentChannel = ChannelService.getCurrentChannel();
   if (currentChannel && currentChannel.restream()) {
     await streamController.start(currentChannel);
@@ -70,13 +133,12 @@ const server = app.listen(PORT, async () => {
   PlaylistUpdater.registerChannelsPlaylist(ChannelService.getChannels());
 });
 
-
 // Web Sockets with explicit CORS configuration
 const io = new Server(server, {
   cors: {
-    origin: "*", // Allow any origin in development
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
     credentials: true,
   },
 });
@@ -87,19 +149,24 @@ io.use(socketAuthMiddleware);
 const connectedUsers = {};
 
 io.on('connection', socket => {
-  console.log('New client connected');
+  console.log('✨ New client connected:', socket.id);
 
   socket.on('new-user', userId => {
     connectedUsers[socket.id] = userId;
     socket.broadcast.emit('user-connected', userId);
-  })
+  });
 
   socket.on('disconnect', () => {
     socket.broadcast.emit('user-disconnected', connectedUsers[socket.id]);
     delete connectedUsers[socket.id];
-  })
+  });
 
   ChannelSocketHandler(io, socket);
   PlaylistSocketHandler(io, socket);
   ChatSocketHandler(io, socket);
-})
+});
+
+// Error handling
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});

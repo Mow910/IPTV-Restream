@@ -1,0 +1,28 @@
+// 📝 SNIPPETS À AJOUTER DANS App.tsx
+
+// ===== 1. Importer le AdminSettingsModal en haut du fichier =====
+import AdminSettingsModal from './components/admin/AdminSettingsModal';
+
+// ===== 2. Ajouter l'état dans AppContent() =====
+const [isAdminSettingsOpen, setIsAdminSettingsOpen] = useState(false);
+
+// ===== 3. Ajouter le bouton Settings dans le header (avant ou après Shield) =====
+{isAdminEnabled && isAdmin && (
+  <button
+    onClick={() => setIsAdminSettingsOpen(true)}
+    className="p-2 hover:bg-gray-800 rounded-lg transition-colors text-blue-500"
+    title="Admin Settings"
+  >
+    <Sliders className="w-6 h-6" />
+  </button>
+)}
+
+// ===== 4. Ajouter le modal avant la fermeture du return principal =====
+<AdminSettingsModal
+  isOpen={isAdminSettingsOpen}
+  onClose={() => setIsAdminSettingsOpen(false)}
+/>
+
+// ===== RÉSUMÉ DES IMPORTS À AJOUTER =====
+import { ..., Sliders } from 'lucide-react';  // Ajouter Sliders à l'import lucide-react
+import AdminSettingsModal from './components/admin/AdminSettingsModal';  // Nouveau
