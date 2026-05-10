@@ -1,4 +1,4 @@
-const request = require('request');
+const axios = require('axios');
 const ChannelService = require('../services/ChannelService');
 const ProxyHelperService = require('../services/proxy/ProxyHelperService');
 const SessionFactory = require('../services/session/SessionFactory');
